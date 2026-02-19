@@ -10,7 +10,7 @@ The benchmarked contract is `ZkKitMerkleBench` (LeanIMT + SMT helpers, Keccak-ba
 
 ## Toolchain / settings
 
-- `fe` **0.26.0** (built from `../fe` at commit `b11d78fb4`)
+- `fe` **0.26.0** (built from `../fe` at commit `67711a769`)
 - `forge` **1.5.0**
 - `solc` **0.8.33** (`/usr/bin/solc`)
 - Foundry optimizer: `optimizer=true`, `optimizer_runs=200` (`fe-zkkit/bench/foundry.toml`)
@@ -18,7 +18,7 @@ The benchmarked contract is `ZkKitMerkleBench` (LeanIMT + SMT helpers, Keccak-ba
 ### Backend flags used
 
 - **fe→sona:** `--backend sonatina --opt-level 0`
-  - Note: `--opt-level 1/2` currently fails fuzz equivalence for this bench (as of `b11d78fb4`); see `FE_ZKKIT_SONATINA_EQUIVALENCE_REPORT.md`. The gas report pins opt-level 0 for correctness.
+  - Note: `--opt-level 1/2` currently fails fuzz equivalence for this bench (as of `67711a769`); see `FE_ZKKIT_SONATINA_EQUIVALENCE_REPORT.md`. The gas report pins opt-level 0 for correctness.
 - **fe→yul(solc):** `--backend yul --optimize --solc /usr/bin/solc`
 
 ## Gas results

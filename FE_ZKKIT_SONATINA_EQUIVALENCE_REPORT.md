@@ -14,7 +14,7 @@ This report documents a reproducible equivalence failure in the Fe **Sonatina** 
 - Date: **2026-02-19**
 - `forge`: **1.5.0-stable**
 - `solc`: **0.8.33** (`/usr/bin/solc`)
-- `fe`: **0.26.0** (local `../fe` repo at commit `4f72b76da`)
+- `fe`: **0.26.0** (local `../fe` repo at commit `67711a769`)
 
 ## Reproduction
 
