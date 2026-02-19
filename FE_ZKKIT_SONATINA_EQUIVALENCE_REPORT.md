@@ -1,22 +1,22 @@
-# Sonatina backend equivalence failures (fe-zkkit/bench)
+# Sonatina backend equivalence status (fe-zkkit/bench)
 
-This report documents a reproducible equivalence failure in the Fe **Sonatina** backend when compiling the `fe-zkkit/zkkit_merkle` contract(s) with `--opt-level 1` or `2`.
+This report previously documented a reproducible equivalence failure in the Fe **Sonatina** backend when compiling the `fe-zkkit/zkkit_merkle` contract(s) with `--opt-level 1` or `2`.
 
-## Summary
+As of the environment below, the issue is **no longer reproducible** for this bench.
 
-- ✅ `fe build --backend sonatina --opt-level 0` passes fuzz equivalence for `fe-zkkit/bench`.
-- ❌ `fe build --backend sonatina --opt-level 1|2` fails equivalence (LeanIMT + SMT).
+## Current status (verified)
+
+- ✅ `fe build --backend sonatina --opt-level 0|1|2` passes fuzz + diff equivalence for `fe-zkkit/bench` (LeanIMT + SMT).
 - ✅ `fe build --backend yul --optimize --solc /usr/bin/solc` continues to match Solidity.
-- The incorrect Sonatina output observed in multiple cases equals `keccak256(0x00…00)` over **64 bytes** (`0xad3228…5fb5`), consistent with `keccak256(left||right)` hashing **zeroed memory**.
 
-## Environment (observed)
+## Environment (verified)
 
 - Date: **2026-02-19**
 - `forge`: **1.5.0-stable**
 - `solc`: **0.8.33** (`/usr/bin/solc`)
-- `fe`: **0.26.0** (local `../fe` repo at commit `67711a769`)
+- `fe`: **0.26.0** (`/usr/local/bin/fe` from `PATH`)
 
-## Reproduction
+## Verify locally
 
 The Foundry tests compile the Fe contracts via FFI in `fe-zkkit/bench/test/ZkKitMerkleBench.t.sol`.
 
@@ -24,12 +24,23 @@ From `fe-zkkit/bench`:
 
 ```bash
 rm -rf out/fe
-forge test --ffi --offline -vvv --match-test test_diff_LeanIMT_computeRoot_smallValues_matchesSolidity
+FE_SONA_OPT_LEVEL=2 forge test --ffi --offline -vvv
 ```
 
-This should pass by default (Sonatina opt-level 0).
+This also passes with `FE_SONA_OPT_LEVEL=0` and `FE_SONA_OPT_LEVEL=1`.
 
-To reproduce the failure:
+## Historical failure details (no longer reproducible)
+
+The sections below are preserved from the original report for context on the failure mode and the minimal counterexample that previously triggered it.
+
+### Summary (historical)
+
+- ✅ `fe build --backend sonatina --opt-level 0` passed fuzz equivalence for `fe-zkkit/bench`.
+- ❌ `fe build --backend sonatina --opt-level 1|2` failed equivalence (LeanIMT + SMT).
+- ✅ `fe build --backend yul --optimize --solc /usr/bin/solc` continued to match Solidity.
+- The incorrect Sonatina output observed in multiple cases equaled `keccak256(0x00…00)` over **64 bytes** (`0xad3228…5fb5`), consistent with `keccak256(left||right)` hashing **zeroed memory**.
+
+### Reproduction (historical)
 
 ```bash
 rm -rf out/fe
@@ -76,7 +87,7 @@ FE_SONA_OPT_LEVEL=1 forge test --ffi --offline -vvv --match-test testFuzz_SMT_co
 
 fails on the first fuzz case (`runs: 0`), where Solidity and Fe→Yul match, but Fe→Sonatina returns the same incorrect root value above.
 
-## Notes / suspected root cause
+## Notes / suspected root cause (historical)
 
 The Merkle hashing helper is implemented in Fe as:
 

@@ -10,15 +10,15 @@ The benchmarked contract is `ZkKitMerkleBench` (LeanIMT + SMT helpers, Keccak-ba
 
 ## Toolchain / settings
 
-- `fe` **0.26.0** (built from `../fe` at commit `67711a769`)
-- `forge` **1.5.0**
+- Date: **2026-02-19**
+- `fe` **0.26.0** (`/usr/local/bin/fe` from `PATH`)
+- `forge` **1.5.0-stable**
 - `solc` **0.8.33** (`/usr/bin/solc`)
 - Foundry optimizer: `optimizer=true`, `optimizer_runs=200` (`fe-zkkit/bench/foundry.toml`)
 
 ### Backend flags used
 
-- **fe→sona:** `--backend sonatina --opt-level 0`
-  - Note: `--opt-level 1/2` currently fails fuzz equivalence for this bench (as of `67711a769`); see `FE_ZKKIT_SONATINA_EQUIVALENCE_REPORT.md`. The gas report pins opt-level 0 for correctness.
+- **fe→sona:** `--backend sonatina --opt-level 2` (via `FE_SONA_OPT_LEVEL=2`)
 - **fe→yul(solc):** `--backend yul --optimize --solc /usr/bin/solc`
 
 ## Gas results
@@ -27,12 +27,12 @@ Numbers below come from `forge test --ffi --offline -vvv --match-test testGas_be
 
 | Benchmark | fe→sona (sonatina) | fe→yul (solc `--optimize`) | Solidity (solc) |
 |---|---:|---:|---:|
-| `computeLeanIMTRoot` (siblings=7) | 10,465 | 9,945 | 10,618 |
-| `computeLeanIMTRoot` (siblings=32) | 17,186 | 15,104 | 16,520 |
-| `updateLeanIMTRoot` (siblings=7) | 12,583 | 11,548 | 7,883 |
-| `computeSMTRoot` (typical enables) | 23,847 | 20,530 | 19,499 |
-| `computeSMTRoot` (all enabled) | 17,212 | 15,737 | 16,447 |
-| `updateSMTRoot` (typical enables) | 39,355 | 32,628 | 25,912 |
+| `computeLeanIMTRoot` (siblings=7) | 9,879 | 9,945 | 10,618 |
+| `computeLeanIMTRoot` (siblings=32) | 14,590 | 15,104 | 16,520 |
+| `updateLeanIMTRoot` (siblings=7) | 11,439 | 11,548 | 7,883 |
+| `computeSMTRoot` (typical enables) | 18,716 | 20,530 | 19,499 |
+| `computeSMTRoot` (all enabled) | 14,634 | 15,737 | 16,447 |
+| `updateSMTRoot` (typical enables) | 29,103 | 32,628 | 25,912 |
 
 ## Bench vectors (for context)
 
@@ -46,9 +46,9 @@ Numbers below come from `forge test --ffi --offline -vvv --match-test testGas_be
 ```bash
 cd fe-zkkit/bench
 rm -rf out/fe
-forge test --ffi --offline -vvv --match-test testGas_bench_
+FE_SONA_OPT_LEVEL=2 forge test --ffi --offline -vvv --match-test testGas_bench_
 
 # Full fuzz + diffs + gas benches:
 rm -rf out/fe
-forge test --ffi --offline -vvv
+FE_SONA_OPT_LEVEL=2 forge test --ffi --offline -vvv
 ```

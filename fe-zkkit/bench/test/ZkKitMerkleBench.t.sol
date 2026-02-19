@@ -64,12 +64,11 @@ contract ZkKitMerkleBenchTest {
 
     function setUp() public {
         vm.pauseGasMetering();
-        // Fe -> Sonatina. NOTE: opt-level >0 currently breaks fuzz equivalence on this bench,
-        // so we default to opt-level 0 (override via `FE_SONA_OPT_LEVEL=1|2` for debugging).
+        // Fe -> Sonatina. Default opt-level 0 (override via `FE_SONA_OPT_LEVEL=1|2`).
         string[] memory cmdSona = new string[](11);
         uint256 sonaOptLevel = vm.envOr("FE_SONA_OPT_LEVEL", uint256(0));
         require(sonaOptLevel <= 2, "BAD_FE_SONA_OPT_LEVEL");
-        cmdSona[0] = "../../../fe/target/debug/fe";
+        cmdSona[0] = "fe";
         cmdSona[1] = "build";
         cmdSona[2] = "--backend";
         cmdSona[3] = "sonatina";
@@ -89,7 +88,7 @@ contract ZkKitMerkleBenchTest {
 
         // Fe -> Yul -> solc (optimized via `--optimize`).
         string[] memory cmdYul = new string[](12);
-        cmdYul[0] = "../../../fe/target/debug/fe";
+        cmdYul[0] = "fe";
         cmdYul[1] = "build";
         cmdYul[2] = "--backend";
         cmdYul[3] = "yul";

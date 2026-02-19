@@ -10,7 +10,7 @@ This is a self-contained Foundry project that helps evaluate **Fe-generated EVM 
 ## Prereqs
 
 - Foundry (`forge`)
-- A local `fe` binary at `../../../fe/target/debug/fe` (this repo layout)
+- A `fe` binary available in your `PATH`
 
 ## Run
 
