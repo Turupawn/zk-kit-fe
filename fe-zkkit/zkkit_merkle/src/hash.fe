@@ -1,0 +1,14 @@
+use std::evm::{alloc, ops}
+
+/// Hash two 32-byte words as `keccak256(left || right)`.
+pub fn hash2_at(ptr: u256, left: u256, right: u256) -> u256 {
+    ops::mstore(ptr, left)
+    ops::mstore(ptr + 32, right)
+    ops::keccak256(ptr, 64)
+}
+
+pub fn hash2(left: u256, right: u256) -> u256 {
+    let ptr = alloc(64)
+    hash2_at(ptr, left, right)
+}
+

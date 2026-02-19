@@ -1,0 +1,204 @@
+use super::hash::hash2_at
+use std::evm::alloc
+
+/// Compute an SMT root with proof compression (siblings omitted when default).
+///
+/// - `DEPTH` is the fixed tree depth.
+/// - `index` bits are read from least-significant upwards (level 0 = LSB).
+/// - `enables` bit `i` indicates whether a sibling is supplied for level `i`.
+/// - `siblings` is a packed list of the enabled siblings, in increasing level order.
+///
+/// Empty node defaults are derived from `zero[0] = 0` and `zero[i+1] = hash(zero[i], zero[i])`.
+pub fn compute_root<const DEPTH: usize>(
+    leaf: u256,
+    index: u256,
+    enables: u256,
+    siblings: [u256; DEPTH],
+) -> u256 {
+    let scratch = alloc(64)
+
+    let mut node = leaf
+    let mut idx = index
+
+    // Fast path: if all siblings are enabled, we never need the default `zero` nodes.
+    let all_enabled_mask = (1 << (DEPTH as u256)) - 1
+    if enables == all_enabled_mask {
+        let mut i: usize = 0
+        while i < DEPTH {
+            let sibling = siblings[i]
+
+            let is_right_child = (idx & 1) == 1
+            idx = idx >> 1
+            if is_right_child {
+                node = hash2_at(scratch, sibling, node)
+            } else {
+                node = hash2_at(scratch, node, sibling)
+            }
+
+            i = i + 1
+        }
+
+        return node
+    }
+
+    let mut en = enables
+    let mut zero: u256 = 0
+    let mut sibling_cursor: usize = 0
+
+    let mut i: usize = 0
+    while i < DEPTH {
+        let enabled = (en & 1) == 1
+        en = en >> 1
+        let sibling = if enabled {
+            let s = siblings[sibling_cursor]
+            sibling_cursor = sibling_cursor + 1
+            s
+        } else {
+            zero
+        }
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+
+        zero = hash2_at(scratch, zero, zero)
+        i = i + 1
+    }
+
+    node
+}
+
+pub fn verify_membership<const DEPTH: usize>(
+    root: u256,
+    leaf: u256,
+    index: u256,
+    enables: u256,
+    siblings: [u256; DEPTH],
+) -> bool {
+    compute_root<DEPTH>(leaf, index, enables, siblings) == root
+}
+
+pub fn update_root<const DEPTH: usize>(
+    current_root: u256,
+    old_leaf: u256,
+    new_leaf: u256,
+    index: u256,
+    enables: u256,
+    siblings: [u256; DEPTH],
+) -> u256 {
+    let scratch = alloc(64)
+
+    // Recompute root from the old leaf.
+    let mut node = old_leaf
+    let mut idx = index
+
+    let all_enabled_mask = (1 << (DEPTH as u256)) - 1
+    if enables == all_enabled_mask {
+        let mut i: usize = 0
+        while i < DEPTH {
+            let sibling = siblings[i]
+
+            let is_right_child = (idx & 1) == 1
+            idx = idx >> 1
+            if is_right_child {
+                node = hash2_at(scratch, sibling, node)
+            } else {
+                node = hash2_at(scratch, node, sibling)
+            }
+
+            i = i + 1
+        }
+
+        if node != current_root {
+            std::evm::ops::revert(0, 0)
+        }
+
+        // Recompute root with the new leaf.
+        node = new_leaf
+        idx = index
+        i = 0
+        while i < DEPTH {
+            let sibling = siblings[i]
+
+            let is_right_child = (idx & 1) == 1
+            idx = idx >> 1
+            if is_right_child {
+                node = hash2_at(scratch, sibling, node)
+            } else {
+                node = hash2_at(scratch, node, sibling)
+            }
+
+            i = i + 1
+        }
+
+        return node
+    }
+
+    let mut en = enables
+    let mut zero: u256 = 0
+    let mut sibling_cursor: usize = 0
+
+    let mut i: usize = 0
+    while i < DEPTH {
+        let enabled = (en & 1) == 1
+        en = en >> 1
+        let sibling = if enabled {
+            let s = siblings[sibling_cursor]
+            sibling_cursor = sibling_cursor + 1
+            s
+        } else {
+            zero
+        }
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+
+        zero = hash2_at(scratch, zero, zero)
+        i = i + 1
+    }
+
+    if node != current_root {
+        std::evm::ops::revert(0, 0)
+    }
+
+    // Recompute root with the new leaf.
+    node = new_leaf
+    idx = index
+    en = enables
+    zero = 0
+    sibling_cursor = 0
+    i = 0
+    while i < DEPTH {
+        let enabled = (en & 1) == 1
+        en = en >> 1
+        let sibling = if enabled {
+            let s = siblings[sibling_cursor]
+            sibling_cursor = sibling_cursor + 1
+            s
+        } else {
+            zero
+        }
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+
+        zero = hash2_at(scratch, zero, zero)
+        i = i + 1
+    }
+
+    node
+}

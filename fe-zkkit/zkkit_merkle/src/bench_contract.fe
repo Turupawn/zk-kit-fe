@@ -1,0 +1,174 @@
+use super::hash::hash2_at
+use std::evm::{ops, Evm}
+
+const DEPTH_32: u256 = 32
+
+fn abi_return_u256(value: u256) -> ! {
+    ops::mstore(0, value)
+    ops::return_data(0, 32)
+}
+
+fn abi_return_bool(value: bool) -> ! {
+    ops::mstore(0, if value { 1 } else { 0 })
+    ops::return_data(0, 32)
+}
+
+fn leanimt_root_from_calldata(leaf: u256, index: u256, siblings_len: u256, siblings_base: u256) -> u256 {
+    if siblings_len > DEPTH_32 {
+        ops::revert(0, 0)
+    }
+
+    let scratch: u256 = 0
+    let mut node = leaf
+    let mut idx = index
+
+    let mut i: u256 = 0
+    while i < siblings_len {
+        let sibling = ops::calldataload(siblings_base + i * 32)
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+
+        i = i + 1
+    }
+
+    node
+}
+
+fn smt_root_from_calldata(leaf: u256, index: u256, enables: u256, siblings_base: u256) -> u256 {
+    let scratch: u256 = 0
+
+    let mut node = leaf
+    let mut idx = index
+
+    // Fast path: if all siblings are enabled, we never need the default `zero` nodes.
+    if enables == 0xffffffff {
+        let mut i: u256 = 0
+        while i < DEPTH_32 {
+            let sibling = ops::calldataload(siblings_base + i * 32)
+
+            let is_right_child = (idx & 1) == 1
+            idx = idx >> 1
+            if is_right_child {
+                node = hash2_at(scratch, sibling, node)
+            } else {
+                node = hash2_at(scratch, node, sibling)
+            }
+
+            i = i + 1
+        }
+
+        return node
+    }
+
+    let mut en = enables
+    let mut zero: u256 = 0
+    let mut sib_index: u256 = 0
+    let mut i: u256 = 0
+    while i < DEPTH_32 {
+        let enabled = (en & 1) == 1
+        en = en >> 1
+        let sibling = if enabled {
+            let s = ops::calldataload(siblings_base + sib_index * 32)
+            sib_index = sib_index + 1
+            s
+        } else {
+            zero
+        }
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+
+        zero = hash2_at(scratch, zero, zero)
+        i = i + 1
+    }
+
+    node
+}
+
+#[contract_init(ZkKitMerkleBench)]
+fn init() uses (evm: mut Evm) {
+    let len = evm.code_region_len(runtime)
+    let offset = evm.code_region_offset(runtime)
+    evm.codecopy(dest: 0, offset, len)
+    evm.return_data(0, len)
+}
+
+#[contract_runtime(ZkKitMerkleBench)]
+fn runtime() uses (evm: mut Evm) {
+    let selector = evm.calldataload(0) >> 224
+
+    match selector {
+        0x863973fa => { // computeLeanIMTRoot(uint256,uint256,uint256,uint256[32])
+            let leaf = evm.calldataload(4)
+            let index = evm.calldataload(36)
+            let siblings_len = evm.calldataload(68)
+            let root = leanimt_root_from_calldata(leaf, index, siblings_len, 100)
+            abi_return_u256(root)
+        }
+        0xba98cc96 => { // verifyLeanIMT(uint256,uint256,uint256,uint256,uint256[32])
+            let root = evm.calldataload(4)
+            let leaf = evm.calldataload(36)
+            let index = evm.calldataload(68)
+            let siblings_len = evm.calldataload(100)
+            let computed = leanimt_root_from_calldata(leaf, index, siblings_len, 132)
+            abi_return_bool(computed == root)
+        }
+        0x3d263c5b => { // updateLeanIMTRoot(uint256,uint256,uint256,uint256,uint256,uint256[32])
+            let current_root = evm.calldataload(4)
+            let old_leaf = evm.calldataload(36)
+            let new_leaf = evm.calldataload(68)
+            let index = evm.calldataload(100)
+            let siblings_len = evm.calldataload(132)
+
+            let old_root = leanimt_root_from_calldata(old_leaf, index, siblings_len, 164)
+            if old_root != current_root {
+                evm.revert(0, 0)
+            }
+
+            let new_root = leanimt_root_from_calldata(new_leaf, index, siblings_len, 164)
+            abi_return_u256(new_root)
+        }
+        0x4c312fd8 => { // computeSMTRoot(uint256,uint256,uint256,uint256[32])
+            let leaf = evm.calldataload(4)
+            let index = evm.calldataload(36)
+            let enables = evm.calldataload(68)
+            let root = smt_root_from_calldata(leaf, index, enables, 100)
+            abi_return_u256(root)
+        }
+        0xd365deea => { // verifySMT(uint256,uint256,uint256,uint256,uint256[32])
+            let root = evm.calldataload(4)
+            let leaf = evm.calldataload(36)
+            let index = evm.calldataload(68)
+            let enables = evm.calldataload(100)
+            let computed = smt_root_from_calldata(leaf, index, enables, 132)
+            abi_return_bool(computed == root)
+        }
+        0xdae4d242 => { // updateSMTRoot(uint256,uint256,uint256,uint256,uint256,uint256,uint256[32])
+            let current_root = evm.calldataload(4)
+            let old_leaf = evm.calldataload(36)
+            let new_leaf = evm.calldataload(68)
+            let index = evm.calldataload(100)
+            let enables = evm.calldataload(132)
+
+            let old_root = smt_root_from_calldata(old_leaf, index, enables, 164)
+            if old_root != current_root {
+                evm.revert(0, 0)
+            }
+
+            let new_root = smt_root_from_calldata(new_leaf, index, enables, 164)
+            abi_return_u256(new_root)
+        }
+        _ => evm.revert(0, 0)
+    }
+}

@@ -1,0 +1,765 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {SolidityMerkleBench} from "../src/SolidityMerkleBench.sol";
+
+interface Vm {
+    function ffi(string[] calldata) external returns (bytes memory);
+    function readFile(string calldata path) external returns (string memory);
+    function pauseGasMetering() external;
+    function resumeGasMetering() external;
+    function envOr(string calldata name, uint256 defaultValue) external returns (uint256);
+}
+
+interface IFeZkKitMerkleBench {
+    function computeLeanIMTRoot(uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] calldata siblings)
+        external
+        view
+        returns (uint256);
+
+    function verifyLeanIMT(
+        uint256 root,
+        uint256 leaf,
+        uint256 index,
+        uint256 siblingsLen,
+        uint256[32] calldata siblings
+    ) external view returns (bool);
+
+    function updateLeanIMTRoot(
+        uint256 currentRoot,
+        uint256 oldLeaf,
+        uint256 newLeaf,
+        uint256 index,
+        uint256 siblingsLen,
+        uint256[32] calldata siblings
+    ) external view returns (uint256);
+
+    function computeSMTRoot(uint256 leaf, uint256 index, uint256 enables, uint256[32] calldata siblings)
+        external
+        view
+        returns (uint256);
+
+    function verifySMT(uint256 root, uint256 leaf, uint256 index, uint256 enables, uint256[32] calldata siblings)
+        external
+        view
+        returns (bool);
+
+    function updateSMTRoot(
+        uint256 currentRoot,
+        uint256 oldLeaf,
+        uint256 newLeaf,
+        uint256 index,
+        uint256 enables,
+        uint256[32] calldata siblings
+    ) external view returns (uint256);
+}
+
+contract ZkKitMerkleBenchTest {
+    address private constant HEVM_ADDRESS = address(uint160(uint256(keccak256("hevm cheat code"))));
+    Vm private constant vm = Vm(HEVM_ADDRESS);
+
+    IFeZkKitMerkleBench private feSona;
+    IFeZkKitMerkleBench private feYul;
+    SolidityMerkleBench private sol;
+
+    function setUp() public {
+        vm.pauseGasMetering();
+        // Fe -> Sonatina. NOTE: opt-level >0 currently breaks fuzz equivalence on this bench,
+        // so we default to opt-level 0 (override via `FE_SONA_OPT_LEVEL=1|2` for debugging).
+        string[] memory cmdSona = new string[](11);
+        uint256 sonaOptLevel = vm.envOr("FE_SONA_OPT_LEVEL", uint256(0));
+        require(sonaOptLevel <= 2, "BAD_FE_SONA_OPT_LEVEL");
+        cmdSona[0] = "../../../fe/target/debug/fe";
+        cmdSona[1] = "build";
+        cmdSona[2] = "--backend";
+        cmdSona[3] = "sonatina";
+        cmdSona[4] = "--opt-level";
+        cmdSona[5] = sonaOptLevel == 0 ? "0" : (sonaOptLevel == 1 ? "1" : "2");
+        cmdSona[6] = "--out-dir";
+        cmdSona[7] = "out/fe/sonatina";
+        cmdSona[8] = "--contract";
+        cmdSona[9] = "ZkKitMerkleBench";
+        cmdSona[10] = "../zkkit_merkle";
+        vm.ffi(cmdSona);
+
+        bytes memory deployCodeSona = _hexStringToBytes(vm.readFile("out/fe/sonatina/ZkKitMerkleBench.bin"));
+        address feSonaAddr = _deploy(deployCodeSona);
+        feSona = IFeZkKitMerkleBench(feSonaAddr);
+        _requireRuntimeMatches(feSonaAddr, "out/fe/sonatina/ZkKitMerkleBench.runtime.bin");
+
+        // Fe -> Yul -> solc (optimized via `--optimize`).
+        string[] memory cmdYul = new string[](12);
+        cmdYul[0] = "../../../fe/target/debug/fe";
+        cmdYul[1] = "build";
+        cmdYul[2] = "--backend";
+        cmdYul[3] = "yul";
+        cmdYul[4] = "--optimize";
+        cmdYul[5] = "--solc";
+        cmdYul[6] = "/usr/bin/solc";
+        cmdYul[7] = "--out-dir";
+        cmdYul[8] = "out/fe/yul";
+        cmdYul[9] = "--contract";
+        cmdYul[10] = "ZkKitMerkleBench";
+        cmdYul[11] = "../zkkit_merkle";
+        vm.ffi(cmdYul);
+
+        bytes memory deployCodeYul = _hexStringToBytes(vm.readFile("out/fe/yul/ZkKitMerkleBench.bin"));
+        address feYulAddr = _deploy(deployCodeYul);
+        feYul = IFeZkKitMerkleBench(feYulAddr);
+        _requireRuntimeMatches(feYulAddr, "out/fe/yul/ZkKitMerkleBench.runtime.bin");
+
+        sol = new SolidityMerkleBench();
+        vm.resumeGasMetering();
+    }
+
+    function _mask32(uint256 x) internal pure returns (uint256) {
+        return x & ((uint256(1) << 32) - 1);
+    }
+
+    function testFuzz_LeanIMT_computeRoot_matchesSolidity(
+        uint256 leaf,
+        uint256 index,
+        uint8 siblingsLen0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 siblingsLen = uint256(siblingsLen0) % 33;
+        uint256 solRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 sonaRoot = feSona.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 yulRoot = feYul.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        assert(sonaRoot == solRoot);
+        assert(yulRoot == solRoot);
+    }
+
+    function test_diff_LeanIMT_computeRoot_smallValues_matchesSolidity() public view {
+        uint256 leaf = 1;
+        uint256 index = 0;
+        uint256 siblingsLen = 2;
+        uint256[32] memory siblings;
+        siblings[0] = 2;
+        siblings[1] = 3;
+
+        uint256 solRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 sonaRoot = feSona.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 yulRoot = feYul.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        assert(sonaRoot == solRoot);
+        assert(yulRoot == solRoot);
+    }
+
+    function testFuzz_LeanIMT_verify_matchesSolidity(
+        uint256 leaf,
+        uint256 index,
+        uint8 siblingsLen0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 siblingsLen = uint256(siblingsLen0) % 33;
+        uint256 root = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        assert(feSona.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
+        assert(feYul.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
+        assert(sol.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
+    }
+
+    function testFuzz_LeanIMT_updateRoot_matchesSolidity(
+        uint256 oldLeaf,
+        uint256 newLeaf,
+        uint256 index,
+        uint8 siblingsLen0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 siblingsLen = uint256(siblingsLen0) % 33;
+        uint256 currentRoot = sol.computeLeanIMTRoot(oldLeaf, index, siblingsLen, siblings);
+
+        uint256 solNewRoot = sol.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
+        uint256 sonaNewRoot = feSona.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
+        uint256 yulNewRoot = feYul.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
+        assert(sonaNewRoot == solNewRoot);
+        assert(yulNewRoot == solNewRoot);
+    }
+
+    function test_diff_LeanIMT_updateRoot_revertsOnInvalidProof() public view {
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+
+        (bool okSona, ) = _staticcallU256(
+            address(feSona),
+            abi.encodeWithSelector(
+                IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+                currentRoot ^ 1,
+                leaf,
+                leaf ^ 2,
+                index,
+                siblingsLen,
+                siblings
+            )
+        );
+
+        (bool okYul, ) = _staticcallU256(
+            address(feYul),
+            abi.encodeWithSelector(
+                IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+                currentRoot ^ 1,
+                leaf,
+                leaf ^ 2,
+                index,
+                siblingsLen,
+                siblings
+            )
+        );
+
+        (bool okSol, ) = _staticcallU256(
+            address(sol),
+            abi.encodeWithSelector(
+                SolidityMerkleBench.updateLeanIMTRoot.selector,
+                currentRoot ^ 1,
+                leaf,
+                leaf ^ 2,
+                index,
+                siblingsLen,
+                siblings
+            )
+        );
+
+        assert(!okSona);
+        assert(!okYul);
+        assert(!okSol);
+    }
+
+    function testFuzz_SMT_computeRoot_matchesSolidity(
+        uint256 leaf,
+        uint256 index,
+        uint256 enables0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 enables = _mask32(enables0);
+        uint256 solRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 sonaRoot = feSona.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 yulRoot = feYul.computeSMTRoot(leaf, index, enables, siblings);
+        assert(sonaRoot == solRoot);
+        assert(yulRoot == solRoot);
+    }
+
+    function testFuzz_SMT_verify_matchesSolidity(
+        uint256 leaf,
+        uint256 index,
+        uint256 enables0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 enables = _mask32(enables0);
+        uint256 root = sol.computeSMTRoot(leaf, index, enables, siblings);
+        assert(feSona.verifySMT(root, leaf, index, enables, siblings) == true);
+        assert(feYul.verifySMT(root, leaf, index, enables, siblings) == true);
+        assert(sol.verifySMT(root, leaf, index, enables, siblings) == true);
+    }
+
+    function testFuzz_SMT_updateRoot_matchesSolidity(
+        uint256 oldLeaf,
+        uint256 newLeaf,
+        uint256 index,
+        uint256 enables0,
+        uint256[32] memory siblings
+    ) public view {
+        uint256 enables = _mask32(enables0);
+        uint256 currentRoot = sol.computeSMTRoot(oldLeaf, index, enables, siblings);
+
+        uint256 solNewRoot = sol.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
+        uint256 sonaNewRoot = feSona.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
+        uint256 yulNewRoot = feYul.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
+        assert(sonaNewRoot == solNewRoot);
+        assert(yulNewRoot == solNewRoot);
+    }
+
+    function test_diff_SMT_updateRoot_revertsOnInvalidProof() public view {
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+
+        (bool okSona, ) = _staticcallU256(
+            address(feSona),
+            abi.encodeWithSelector(
+                IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot ^ 1, leaf, leaf ^ 2, index, enables, siblings
+            )
+        );
+
+        (bool okYul, ) = _staticcallU256(
+            address(feYul),
+            abi.encodeWithSelector(
+                IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot ^ 1, leaf, leaf ^ 2, index, enables, siblings
+            )
+        );
+
+        (bool okSol, ) = _staticcallU256(
+            address(sol),
+            abi.encodeWithSelector(
+                SolidityMerkleBench.updateSMTRoot.selector, currentRoot ^ 1, leaf, leaf ^ 2, index, enables, siblings
+            )
+        );
+
+        assert(!okSona);
+        assert(!okYul);
+        assert(!okSol);
+    }
+
+    function test_diff_LeanIMT_computeRoot_revertsOnSiblingsLenGt32() public view {
+        uint256[32] memory siblings;
+
+        (bool okSona, ) = _staticcallU256(
+            address(feSona),
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, uint256(1), uint256(0), 33, siblings)
+        );
+
+        (bool okYul, ) = _staticcallU256(
+            address(feYul),
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, uint256(1), uint256(0), 33, siblings)
+        );
+
+        (bool okSol, ) = _staticcallU256(
+            address(sol),
+            abi.encodeWithSelector(SolidityMerkleBench.computeLeanIMTRoot.selector, uint256(1), uint256(0), 33, siblings)
+        );
+
+        assert(!okSona);
+        assert(!okYul);
+        assert(!okSol);
+    }
+
+    // -------------------------------------------------------------------------
+    // Gas benches
+    // -------------------------------------------------------------------------
+
+    function testGas_bench_fe_sona_computeLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/sona: computeLeanIMTRoot");
+    }
+
+    function testGas_bench_fe_yul_computeLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/yul: computeLeanIMTRoot");
+    }
+
+    function testGas_bench_solidity_computeLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "Solidity: computeLeanIMTRoot");
+    }
+
+    function testGas_bench_fe_sona_computeLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/sona: computeLeanIMTRoot (32)");
+    }
+
+    function testGas_bench_fe_yul_computeLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/yul: computeLeanIMTRoot (32)");
+    }
+
+    function testGas_bench_solidity_computeLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.computeLeanIMTRoot.selector, leaf, index, siblingsLen, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "Solidity: computeLeanIMTRoot (32)");
+    }
+
+    function testGas_bench_fe_sona_updateLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/sona: updateLeanIMTRoot");
+    }
+
+    function testGas_bench_fe_yul_updateLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/yul: updateLeanIMTRoot");
+    }
+
+    function testGas_bench_solidity_updateLeanIMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "Solidity: updateLeanIMTRoot");
+    }
+
+    function testGas_bench_fe_sona_computeSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/sona: computeSMTRoot");
+    }
+
+    function testGas_bench_fe_yul_computeSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/yul: computeSMTRoot");
+    }
+
+    function testGas_bench_solidity_computeSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "Solidity: computeSMTRoot");
+    }
+
+    function testGas_bench_fe_sona_computeSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/sona: computeSMTRoot (all enabled)");
+    }
+
+    function testGas_bench_fe_yul_computeSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "FE/yul: computeSMTRoot (all enabled)");
+    }
+
+    function testGas_bench_solidity_computeSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.computeSMTRoot.selector, leaf, index, enables, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 root) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && root != 0, "Solidity: computeSMTRoot (all enabled)");
+    }
+
+    function testGas_bench_fe_sona_updateSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/sona: updateSMTRoot");
+    }
+
+    function testGas_bench_fe_yul_updateSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/yul: updateSMTRoot");
+    }
+
+    function testGas_bench_solidity_updateSMTRoot_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "Solidity: updateSMTRoot");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test vectors
+    // -------------------------------------------------------------------------
+
+    function _demoLeanIMT()
+        private
+        pure
+        returns (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings)
+    {
+        leaf = uint256(keccak256("leaf"));
+        index = 11;
+        siblingsLen = 7;
+        siblings[0] = uint256(keccak256("sib0"));
+        siblings[1] = uint256(keccak256("sib1"));
+        siblings[2] = uint256(keccak256("sib2"));
+        siblings[3] = uint256(keccak256("sib3"));
+        siblings[4] = uint256(keccak256("sib4"));
+        siblings[5] = uint256(keccak256("sib5"));
+        siblings[6] = uint256(keccak256("sib6"));
+    }
+
+    function _demoLeanIMT_32()
+        private
+        pure
+        returns (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings)
+    {
+        leaf = uint256(keccak256("leaf"));
+        index = 0x1234_5678;
+        siblingsLen = 32;
+        for (uint256 i = 0; i < 32; i++) {
+            siblings[i] = uint256(keccak256(abi.encodePacked("sib", i)));
+        }
+    }
+
+    function _demoSMT()
+        private
+        pure
+        returns (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings)
+    {
+        leaf = uint256(keccak256("leaf"));
+        index = 0x1234_5678;
+        enables = 0;
+
+        // Enable siblings at a few levels; siblings are packed in order.
+        enables |= 1 << 0;
+        enables |= 1 << 3;
+        enables |= 1 << 5;
+        enables |= 1 << 12;
+        enables |= 1 << 31;
+
+        siblings[0] = uint256(keccak256("s0"));
+        siblings[1] = uint256(keccak256("s3"));
+        siblings[2] = uint256(keccak256("s5"));
+        siblings[3] = uint256(keccak256("s12"));
+        siblings[4] = uint256(keccak256("s31"));
+    }
+
+    function _demoSMT_allEnabled()
+        private
+        pure
+        returns (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings)
+    {
+        leaf = uint256(keccak256("leaf"));
+        index = 0x1234_5678;
+        enables = type(uint32).max;
+        for (uint256 i = 0; i < 32; i++) {
+            siblings[i] = uint256(keccak256(abi.encodePacked("s", i)));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Low-level helpers
+    // -------------------------------------------------------------------------
+
+    function _staticcallU256(address target, bytes memory callData) private view returns (bool ok, uint256 result) {
+        uint256 out;
+        assembly ("memory-safe") {
+            ok := staticcall(gas(), target, add(callData, 0x20), mload(callData), 0x00, 0x20)
+            out := mload(0x00)
+        }
+
+        return (ok, out);
+    }
+
+    function _warm(address target) private view {
+        assembly ("memory-safe") {
+            pop(extcodesize(target))
+        }
+    }
+
+    function _deploy(bytes memory creationCode) private returns (address deployed) {
+        assembly ("memory-safe") {
+            deployed := create(0, add(creationCode, 0x20), mload(creationCode))
+        }
+        require(deployed != address(0), "DEPLOY_FAILED");
+    }
+
+    function _requireRuntimeMatches(address deployed, string memory runtimePath) private {
+        bytes memory expected = _hexStringToBytes(vm.readFile(runtimePath));
+        bytes memory actual = deployed.code;
+        require(keccak256(actual) == keccak256(expected), "RUNTIME_MISMATCH");
+    }
+
+    function _hexStringToBytes(string memory s) private pure returns (bytes memory) {
+        bytes memory strBytes = bytes(s);
+        uint256 start = 0;
+        uint256 end = strBytes.length;
+
+        while (start < end && _isWhitespace(strBytes[start])) {
+            start++;
+        }
+        while (end > start && _isWhitespace(strBytes[end - 1])) {
+            end--;
+        }
+
+        if (
+            end >= start + 2 && strBytes[start] == 0x30
+                && (strBytes[start + 1] == 0x78 || strBytes[start + 1] == 0x58)
+        ) {
+            start += 2;
+        }
+
+        uint256 hexLen = end - start;
+        require(hexLen % 2 == 0, "HEX_ODD_LENGTH");
+
+        bytes memory out = new bytes(hexLen / 2);
+        for (uint256 i = 0; i < out.length; i++) {
+            out[i] =
+                bytes1((_fromHexChar(strBytes[start + 2 * i]) << 4) | _fromHexChar(strBytes[start + 2 * i + 1]));
+        }
+        return out;
+    }
+
+    function _isWhitespace(bytes1 c) private pure returns (bool) {
+        return c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d;
+    }
+
+    function _fromHexChar(bytes1 c) private pure returns (uint8) {
+        uint8 b = uint8(c);
+        if (b >= 48 && b <= 57) {
+            return b - 48;
+        }
+        if (b >= 65 && b <= 70) {
+            return b - 55;
+        }
+        if (b >= 97 && b <= 102) {
+            return b - 87;
+        }
+        revert("HEX_BAD_CHAR");
+    }
+}

@@ -1,0 +1,100 @@
+use super::hash::hash2_at
+use std::evm::{alloc, ops}
+
+/// LeanIMT Merkle proof root reconstruction (Algorithm 6 in the LeanIMT paper).
+///
+/// `siblings` is a fixed-size buffer; only the first `siblings_len` elements are used.
+pub fn compute_root_from_proof<const MAX_SIBLINGS: usize>(
+    leaf: u256,
+    index: u256,
+    siblings_len: u256,
+    siblings: [u256; MAX_SIBLINGS],
+) -> u256 {
+    if siblings_len > (MAX_SIBLINGS as u256) {
+        ops::revert(0, 0)
+    }
+
+    let scratch = alloc(64)
+    let mut node = leaf
+    let mut idx = index
+    let siblings_len_usize: usize = siblings_len as usize
+
+    let mut i: usize = 0
+    while i < siblings_len_usize {
+        let sibling = siblings[i]
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+        i = i + 1
+    }
+
+    node
+}
+
+pub fn verify_proof<const MAX_SIBLINGS: usize>(
+    root: u256,
+    leaf: u256,
+    index: u256,
+    siblings_len: u256,
+    siblings: [u256; MAX_SIBLINGS],
+) -> bool {
+    compute_root_from_proof<MAX_SIBLINGS>(leaf, index, siblings_len, siblings) == root
+}
+
+pub fn update_root_from_proof<const MAX_SIBLINGS: usize>(
+    current_root: u256,
+    old_leaf: u256,
+    new_leaf: u256,
+    index: u256,
+    siblings_len: u256,
+    siblings: [u256; MAX_SIBLINGS],
+) -> u256 {
+    if siblings_len > (MAX_SIBLINGS as u256) {
+        ops::revert(0, 0)
+    }
+
+    let scratch = alloc(64)
+    let siblings_len_usize: usize = siblings_len as usize
+
+    // Recompute root from the old leaf.
+    let mut node = old_leaf
+    let mut idx = index
+    let mut i: usize = 0
+    while i < siblings_len_usize {
+        let sibling = siblings[i]
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+        i = i + 1
+    }
+
+    if node != current_root {
+        ops::revert(0, 0)
+    }
+
+    // Recompute root with the new leaf.
+    node = new_leaf
+    idx = index
+    i = 0
+    while i < siblings_len_usize {
+        let sibling = siblings[i]
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            node = hash2_at(scratch, sibling, node)
+        } else {
+            node = hash2_at(scratch, node, sibling)
+        }
+        i = i + 1
+    }
+
+    node
+}

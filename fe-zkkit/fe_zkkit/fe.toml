@@ -1,0 +1,7 @@
+[ingot]
+name = "fe_zkkit"
+version = "0.1.0"
+
+[dependencies]
+zkkit_merkle = true
+

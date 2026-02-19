@@ -1,0 +1,5 @@
+[workspace]
+name = "fe-zkkit"
+version = "0.1.0"
+members = ["zkkit_merkle", "fe_zkkit"]
+
