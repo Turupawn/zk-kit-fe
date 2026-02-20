@@ -40,6 +40,47 @@ fn leanimt_root_from_calldata(leaf: u256, index: u256, siblings_len: u256, sibli
     node
 }
 
+fn leanimt_update_root_from_calldata(
+    current_root: u256,
+    old_leaf: u256,
+    new_leaf: u256,
+    index: u256,
+    siblings_len: u256,
+    siblings_base: u256,
+) -> u256 {
+    if siblings_len > DEPTH_32 {
+        ops::revert(0, 0)
+    }
+
+    let scratch: u256 = 0
+    let mut old_node = old_leaf
+    let mut new_node = new_leaf
+    let mut idx = index
+
+    let mut i: u256 = 0
+    while i < siblings_len {
+        let sibling = ops::calldataload(siblings_base + i * 32)
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            old_node = hash2_at(scratch, sibling, old_node)
+            new_node = hash2_at(scratch, sibling, new_node)
+        } else {
+            old_node = hash2_at(scratch, old_node, sibling)
+            new_node = hash2_at(scratch, new_node, sibling)
+        }
+
+        i = i + 1
+    }
+
+    if old_node != current_root {
+        ops::revert(0, 0)
+    }
+
+    new_node
+}
+
 fn smt_root_from_calldata(leaf: u256, index: u256, enables: u256, siblings_base: u256) -> u256 {
     let scratch: u256 = 0
 
@@ -96,6 +137,82 @@ fn smt_root_from_calldata(leaf: u256, index: u256, enables: u256, siblings_base:
     node
 }
 
+fn smt_update_root_from_calldata(
+    current_root: u256,
+    old_leaf: u256,
+    new_leaf: u256,
+    index: u256,
+    enables: u256,
+    siblings_base: u256,
+) -> u256 {
+    let scratch: u256 = 0
+
+    let mut old_node = old_leaf
+    let mut new_node = new_leaf
+    let mut idx = index
+
+    // Fast path: if all siblings are enabled, we never need the default `zero` nodes.
+    if enables == 0xffffffff {
+        let mut i: u256 = 0
+        while i < DEPTH_32 {
+            let sibling = ops::calldataload(siblings_base + i * 32)
+
+            let is_right_child = (idx & 1) == 1
+            idx = idx >> 1
+            if is_right_child {
+                old_node = hash2_at(scratch, sibling, old_node)
+                new_node = hash2_at(scratch, sibling, new_node)
+            } else {
+                old_node = hash2_at(scratch, old_node, sibling)
+                new_node = hash2_at(scratch, new_node, sibling)
+            }
+
+            i = i + 1
+        }
+
+        if old_node != current_root {
+            ops::revert(0, 0)
+        }
+
+        return new_node
+    }
+
+    let mut en = enables
+    let mut zero: u256 = 0
+    let mut sib_index: u256 = 0
+    let mut i: u256 = 0
+    while i < DEPTH_32 {
+        let enabled = (en & 1) == 1
+        en = en >> 1
+        let sibling = if enabled {
+            let s = ops::calldataload(siblings_base + sib_index * 32)
+            sib_index = sib_index + 1
+            s
+        } else {
+            zero
+        }
+
+        let is_right_child = (idx & 1) == 1
+        idx = idx >> 1
+        if is_right_child {
+            old_node = hash2_at(scratch, sibling, old_node)
+            new_node = hash2_at(scratch, sibling, new_node)
+        } else {
+            old_node = hash2_at(scratch, old_node, sibling)
+            new_node = hash2_at(scratch, new_node, sibling)
+        }
+
+        zero = hash2_at(scratch, zero, zero)
+        i = i + 1
+    }
+
+    if old_node != current_root {
+        ops::revert(0, 0)
+    }
+
+    new_node
+}
+
 #[contract_init(ZkKitMerkleBench)]
 fn init() uses (evm: mut Evm) {
     let len = evm.code_region_len(runtime)
@@ -131,12 +248,7 @@ fn runtime() uses (evm: mut Evm) {
             let index = evm.calldataload(100)
             let siblings_len = evm.calldataload(132)
 
-            let old_root = leanimt_root_from_calldata(old_leaf, index, siblings_len, 164)
-            if old_root != current_root {
-                evm.revert(0, 0)
-            }
-
-            let new_root = leanimt_root_from_calldata(new_leaf, index, siblings_len, 164)
+            let new_root = leanimt_update_root_from_calldata(current_root, old_leaf, new_leaf, index, siblings_len, 164)
             abi_return_u256(new_root)
         }
         0x4c312fd8 => { // computeSMTRoot(uint256,uint256,uint256,uint256[32])
@@ -161,12 +273,7 @@ fn runtime() uses (evm: mut Evm) {
             let index = evm.calldataload(100)
             let enables = evm.calldataload(132)
 
-            let old_root = smt_root_from_calldata(old_leaf, index, enables, 164)
-            if old_root != current_root {
-                evm.revert(0, 0)
-            }
-
-            let new_root = smt_root_from_calldata(new_leaf, index, enables, 164)
+            let new_root = smt_update_root_from_calldata(current_root, old_leaf, new_leaf, index, enables, 164)
             abi_return_u256(new_root)
         }
         _ => evm.revert(0, 0)

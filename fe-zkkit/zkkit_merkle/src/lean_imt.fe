@@ -60,8 +60,8 @@ pub fn update_root_from_proof<const MAX_SIBLINGS: usize>(
     let scratch = alloc(64)
     let siblings_len_usize: usize = siblings_len as usize
 
-    // Recompute root from the old leaf.
-    let mut node = old_leaf
+    let mut old_node = old_leaf
+    let mut new_node = new_leaf
     let mut idx = index
     let mut i: usize = 0
     while i < siblings_len_usize {
@@ -69,32 +69,18 @@ pub fn update_root_from_proof<const MAX_SIBLINGS: usize>(
         let is_right_child = (idx & 1) == 1
         idx = idx >> 1
         if is_right_child {
-            node = hash2_at(scratch, sibling, node)
+            old_node = hash2_at(scratch, sibling, old_node)
+            new_node = hash2_at(scratch, sibling, new_node)
         } else {
-            node = hash2_at(scratch, node, sibling)
+            old_node = hash2_at(scratch, old_node, sibling)
+            new_node = hash2_at(scratch, new_node, sibling)
         }
         i = i + 1
     }
 
-    if node != current_root {
+    if old_node != current_root {
         ops::revert(0, 0)
     }
 
-    // Recompute root with the new leaf.
-    node = new_leaf
-    idx = index
-    i = 0
-    while i < siblings_len_usize {
-        let sibling = siblings[i]
-        let is_right_child = (idx & 1) == 1
-        idx = idx >> 1
-        if is_right_child {
-            node = hash2_at(scratch, sibling, node)
-        } else {
-            node = hash2_at(scratch, node, sibling)
-        }
-        i = i + 1
-    }
-
-    node
+    new_node
 }

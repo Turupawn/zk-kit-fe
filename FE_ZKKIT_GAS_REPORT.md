@@ -43,10 +43,10 @@ Numbers below come from `forge test --ffi --offline -vvv --match-test testGas_be
 |---|---:|---:|---:|
 | `computeLeanIMTRoot` (siblings=7) | 9,783 | 9,945 | 10,618 |
 | `computeLeanIMTRoot` (siblings=32) | 14,194 | 15,104 | 16,520 |
-| `updateLeanIMTRoot` (siblings=7) | 11,241 | 11,548 | 7,883 |
+| `updateLeanIMTRoot` (siblings=7) | 10,406 | 10,620 | 7,883 |
 | `computeSMTRoot` (typical enables) | 18,128 | 20,530 | 19,499 |
 | `computeSMTRoot` (all enabled) | 14,238 | 15,737 | 16,447 |
-| `updateSMTRoot` (typical enables) | 27,921 | 32,628 | 25,912 |
+| `updateSMTRoot` (typical enables) | 21,073 | 23,237 | 25,912 |
 
 ## Bench vectors (for context)
 

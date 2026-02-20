@@ -92,8 +92,8 @@ pub fn update_root<const DEPTH: usize>(
 ) -> u256 {
     let scratch = alloc(64)
 
-    // Recompute root from the old leaf.
-    let mut node = old_leaf
+    let mut old_node = old_leaf
+    let mut new_node = new_leaf
     let mut idx = index
 
     let all_enabled_mask = (1 << (DEPTH as u256)) - 1
@@ -105,37 +105,21 @@ pub fn update_root<const DEPTH: usize>(
             let is_right_child = (idx & 1) == 1
             idx = idx >> 1
             if is_right_child {
-                node = hash2_at(scratch, sibling, node)
+                old_node = hash2_at(scratch, sibling, old_node)
+                new_node = hash2_at(scratch, sibling, new_node)
             } else {
-                node = hash2_at(scratch, node, sibling)
+                old_node = hash2_at(scratch, old_node, sibling)
+                new_node = hash2_at(scratch, new_node, sibling)
             }
 
             i = i + 1
         }
 
-        if node != current_root {
+        if old_node != current_root {
             std::evm::ops::revert(0, 0)
         }
 
-        // Recompute root with the new leaf.
-        node = new_leaf
-        idx = index
-        i = 0
-        while i < DEPTH {
-            let sibling = siblings[i]
-
-            let is_right_child = (idx & 1) == 1
-            idx = idx >> 1
-            if is_right_child {
-                node = hash2_at(scratch, sibling, node)
-            } else {
-                node = hash2_at(scratch, node, sibling)
-            }
-
-            i = i + 1
-        }
-
-        return node
+        return new_node
     }
 
     let mut en = enables
@@ -157,48 +141,20 @@ pub fn update_root<const DEPTH: usize>(
         let is_right_child = (idx & 1) == 1
         idx = idx >> 1
         if is_right_child {
-            node = hash2_at(scratch, sibling, node)
+            old_node = hash2_at(scratch, sibling, old_node)
+            new_node = hash2_at(scratch, sibling, new_node)
         } else {
-            node = hash2_at(scratch, node, sibling)
+            old_node = hash2_at(scratch, old_node, sibling)
+            new_node = hash2_at(scratch, new_node, sibling)
         }
 
         zero = hash2_at(scratch, zero, zero)
         i = i + 1
     }
 
-    if node != current_root {
+    if old_node != current_root {
         std::evm::ops::revert(0, 0)
     }
 
-    // Recompute root with the new leaf.
-    node = new_leaf
-    idx = index
-    en = enables
-    zero = 0
-    sibling_cursor = 0
-    i = 0
-    while i < DEPTH {
-        let enabled = (en & 1) == 1
-        en = en >> 1
-        let sibling = if enabled {
-            let s = siblings[sibling_cursor]
-            sibling_cursor = sibling_cursor + 1
-            s
-        } else {
-            zero
-        }
-
-        let is_right_child = (idx & 1) == 1
-        idx = idx >> 1
-        if is_right_child {
-            node = hash2_at(scratch, sibling, node)
-        } else {
-            node = hash2_at(scratch, node, sibling)
-        }
-
-        zero = hash2_at(scratch, zero, zero)
-        i = i + 1
-    }
-
-    node
+    new_node
 }
