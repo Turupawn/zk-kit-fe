@@ -11,10 +11,21 @@ As of the environment below, the issue is **no longer reproducible** for this be
 
 ## Environment (verified)
 
-- Date: **2026-02-19**
+- Date: **2026-02-20**
 - `forge`: **1.5.0-stable**
 - `solc`: **0.8.33** (`/usr/bin/solc`)
 - `fe`: **0.26.0** (`/usr/local/bin/fe` from `PATH`)
+- `fe` repo: `../fe` @ `2abb2602b`
+
+## What "equivalence" means here
+
+`fe-zkkit/bench` deploys three implementations of the same Merkle helpers:
+
+- Fe→Sonatina (`--backend sonatina`) compiled from `fe-zkkit/zkkit_merkle`
+- Fe→Yul→solc (`--backend yul --optimize --solc /usr/bin/solc`)
+- Solidity reference (`fe-zkkit/bench/src/SolidityMerkleBench.sol`)
+
+The test suite fuzzes and diffs `compute*`, `verify*`, and `update*` behavior against the Solidity reference (including revert cases), so "equivalence" here means identical outputs for the same inputs (or identical failure/revert behavior for invalid proofs).
 
 ## Verify locally
 

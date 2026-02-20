@@ -8,10 +8,24 @@ This repo includes `fe-zkkit/bench`, a Foundry project that deploys equivalent M
 
 The benchmarked contract is `ZkKitMerkleBench` (LeanIMT + SMT helpers, Keccak-based).
 
+## What the benchmarks do
+
+The gas benches measure the runtime cost of computing and updating Merkle roots for two Keccak-based helpers:
+
+- **LeanIMT** (`computeLeanIMTRoot` / `updateLeanIMTRoot`): iteratively hashes `keccak256(left || right)` up the tree for `siblingsLen` levels, choosing `(left,right)` order from the `index` bit at each level.
+- **SMT** (`computeSMTRoot` / `updateSMTRoot`): iterates 32 levels; `enables` is a bitmask that selects whether each level uses a provided sibling or the default `zero` node. In the non-all-enabled case it also updates the default node each level via `zero = keccak256(zero || zero)`.
+
+Measurement notes:
+
+- Each benchmark is one `staticcall` into an already-deployed contract.
+- `vm.pauseGasMetering()/resumeGasMetering()` excludes calldata encoding and vector setup, and `_warm()` (`extcodesize(target)`) avoids cold-account access on the measured call.
+- The `update*` benches compute `currentRoot` using the Solidity reference while gas metering is paused, then call `update*` with `newLeaf = oldLeaf ^ 0x1234`.
+
 ## Toolchain / settings
 
-- Date: **2026-02-19**
+- Date: **2026-02-20**
 - `fe` **0.26.0** (`/usr/local/bin/fe` from `PATH`)
+- `fe` repo: `../fe` @ `2abb2602b`
 - `forge` **1.5.0-stable**
 - `solc` **0.8.33** (`/usr/bin/solc`)
 - Foundry optimizer: `optimizer=true`, `optimizer_runs=200` (`fe-zkkit/bench/foundry.toml`)
@@ -27,12 +41,12 @@ Numbers below come from `forge test --ffi --offline -vvv --match-test testGas_be
 
 | Benchmark | fe→sona (sonatina) | fe→yul (solc `--optimize`) | Solidity (solc) |
 |---|---:|---:|---:|
-| `computeLeanIMTRoot` (siblings=7) | 9,879 | 9,945 | 10,618 |
-| `computeLeanIMTRoot` (siblings=32) | 14,590 | 15,104 | 16,520 |
-| `updateLeanIMTRoot` (siblings=7) | 11,439 | 11,548 | 7,883 |
-| `computeSMTRoot` (typical enables) | 18,716 | 20,530 | 19,499 |
-| `computeSMTRoot` (all enabled) | 14,634 | 15,737 | 16,447 |
-| `updateSMTRoot` (typical enables) | 29,103 | 32,628 | 25,912 |
+| `computeLeanIMTRoot` (siblings=7) | 9,783 | 9,945 | 10,618 |
+| `computeLeanIMTRoot` (siblings=32) | 14,194 | 15,104 | 16,520 |
+| `updateLeanIMTRoot` (siblings=7) | 11,241 | 11,548 | 7,883 |
+| `computeSMTRoot` (typical enables) | 18,128 | 20,530 | 19,499 |
+| `computeSMTRoot` (all enabled) | 14,238 | 15,737 | 16,447 |
+| `updateSMTRoot` (typical enables) | 27,921 | 32,628 | 25,912 |
 
 ## Bench vectors (for context)
 
