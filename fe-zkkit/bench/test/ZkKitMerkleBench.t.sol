@@ -62,6 +62,11 @@ contract ZkKitMerkleBenchTest {
     IFeZkKitMerkleBench private feYul;
     SolidityMerkleBench private sol;
 
+    uint256 private exhaustive;
+    uint256 private exhaustiveLeanIMTMaxSiblings;
+    uint256 private exhaustiveSMTMaxBits;
+    uint256 private exhaustiveValueMax;
+
     function setUp() public {
         vm.pauseGasMetering();
         // Fe -> Sonatina. Default opt-level 0 (override via `FE_SONA_OPT_LEVEL=1|2`).
@@ -108,11 +113,138 @@ contract ZkKitMerkleBenchTest {
         _requireRuntimeMatches(feYulAddr, "out/fe/yul/ZkKitMerkleBench.runtime.bin");
 
         sol = new SolidityMerkleBench();
+        exhaustive = vm.envOr("FE_ZKKIT_EXHAUSTIVE", uint256(0));
+        exhaustiveLeanIMTMaxSiblings = vm.envOr("FE_ZKKIT_EXHAUSTIVE_LEANIMT_MAX_SIBLINGS", uint256(5));
+        exhaustiveSMTMaxBits = vm.envOr("FE_ZKKIT_EXHAUSTIVE_SMT_MAX_BITS", uint256(5));
+        exhaustiveValueMax = vm.envOr("FE_ZKKIT_EXHAUSTIVE_VALUE_MAX", uint256(3));
         vm.resumeGasMetering();
     }
 
     function _mask32(uint256 x) internal pure returns (uint256) {
         return x & ((uint256(1) << 32) - 1);
+    }
+
+    function _popcount32(uint256 x) internal pure returns (uint256 count) {
+        x = _mask32(x);
+        while (x != 0) {
+            count += x & 1;
+            x >>= 1;
+        }
+    }
+
+    function _assertLeanIMTRootsMatch(uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings)
+        private
+        view
+        returns (uint256 root)
+    {
+        root = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        assert(feSona.computeLeanIMTRoot(leaf, index, siblingsLen, siblings) == root);
+        assert(feYul.computeLeanIMTRoot(leaf, index, siblingsLen, siblings) == root);
+    }
+
+    function _assertSMTRootsMatch(uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings)
+        private
+        view
+        returns (uint256 root)
+    {
+        root = sol.computeSMTRoot(leaf, index, enables, siblings);
+        assert(feSona.computeSMTRoot(leaf, index, enables, siblings) == root);
+        assert(feYul.computeSMTRoot(leaf, index, enables, siblings) == root);
+    }
+
+    function _hash2(uint256 left, uint256 right) private pure returns (uint256 digest) {
+        assembly ("memory-safe") {
+            mstore(0x00, left)
+            mstore(0x20, right)
+            digest := keccak256(0x00, 0x40)
+        }
+    }
+
+    function _computeLeanIMTRootLocal(uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings)
+        private
+        pure
+        returns (uint256 node)
+    {
+        if (siblingsLen > 32) {
+            assembly ("memory-safe") {
+                revert(0, 0)
+            }
+        }
+
+        node = leaf;
+        uint256 idx = index;
+        for (uint256 i = 0; i < siblingsLen; i++) {
+            uint256 sibling = siblings[i];
+            bool isRightChild = (idx & 1) == 1;
+            idx >>= 1;
+            node = isRightChild ? _hash2(sibling, node) : _hash2(node, sibling);
+        }
+    }
+
+    function _computeSMTRootLocal(uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings)
+        private
+        pure
+        returns (uint256 node)
+    {
+        node = leaf;
+        uint256 idx = index;
+
+        if (enables == type(uint32).max) {
+            for (uint256 i = 0; i < 32; i++) {
+                uint256 sibling = siblings[i];
+                bool isRightChild = (idx & 1) == 1;
+                idx >>= 1;
+                node = isRightChild ? _hash2(sibling, node) : _hash2(node, sibling);
+            }
+            return node;
+        }
+
+        uint256 zero = 0;
+        uint256 cursor = 0;
+        uint256 e = enables;
+        for (uint256 i = 0; i < 32; i++) {
+            uint256 sibling = (e & 1) == 1 ? siblings[cursor++] : zero;
+            e >>= 1;
+            bool isRightChild = (idx & 1) == 1;
+            idx >>= 1;
+            node = isRightChild ? _hash2(sibling, node) : _hash2(node, sibling);
+            zero = _hash2(zero, zero);
+        }
+    }
+
+    function _expandSMTSiblings(uint256 enables, uint256[32] memory packedSiblings)
+        private
+        pure
+        returns (uint256[32] memory fullSiblings)
+    {
+        uint256 zero = 0;
+        uint256 cursor = 0;
+        uint256 e = enables;
+        for (uint256 i = 0; i < 32; i++) {
+            if ((e & 1) == 1) {
+                fullSiblings[i] = packedSiblings[cursor++];
+            } else {
+                fullSiblings[i] = zero;
+            }
+            e >>= 1;
+            zero = _hash2(zero, zero);
+        }
+    }
+
+    function _assertSMTRootMatchesExpandedLeanIMT(
+        uint256 leaf,
+        uint256 index,
+        uint256 enables,
+        uint256[32] memory packedSiblings,
+        uint256 solSMTRoot
+    ) private view {
+        uint256[32] memory fullSiblings = _expandSMTSiblings(enables, packedSiblings);
+
+        uint256 solLeanRoot = sol.computeLeanIMTRoot(leaf, index, 32, fullSiblings);
+        assert(solLeanRoot == solSMTRoot);
+
+        assert(feSona.computeLeanIMTRoot(leaf, index, 32, fullSiblings) == solSMTRoot);
+        assert(feYul.computeLeanIMTRoot(leaf, index, 32, fullSiblings) == solSMTRoot);
     }
 
     function testFuzz_LeanIMT_computeRoot_matchesSolidity(
@@ -122,11 +254,17 @@ contract ZkKitMerkleBenchTest {
         uint256[32] memory siblings
     ) public view {
         uint256 siblingsLen = uint256(siblingsLen0) % 33;
-        uint256 solRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
-        uint256 sonaRoot = feSona.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
-        uint256 yulRoot = feYul.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
-        assert(sonaRoot == solRoot);
-        assert(yulRoot == solRoot);
+        uint256 solRoot = _assertLeanIMTRootsMatch(leaf, index, siblingsLen, siblings);
+
+        // Invariance: high index bits above `siblingsLen` are ignored.
+        uint256 index2 = index ^ (uint256(1) << siblingsLen);
+        assert(_assertLeanIMTRootsMatch(leaf, index2, siblingsLen, siblings) == solRoot);
+
+        // Invariance: siblings after `siblingsLen` are ignored.
+        for (uint256 i = siblingsLen; i < 32; i++) {
+            siblings[i] ^= ((index ^ (i + 1)) | 1);
+        }
+        assert(_assertLeanIMTRootsMatch(leaf, index, siblingsLen, siblings) == solRoot);
     }
 
     function test_diff_LeanIMT_computeRoot_smallValues_matchesSolidity() public view {
@@ -155,6 +293,11 @@ contract ZkKitMerkleBenchTest {
         assert(feSona.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
         assert(feYul.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
         assert(sol.verifyLeanIMT(root, leaf, index, siblingsLen, siblings) == true);
+
+        uint256 badRoot = root ^ 1;
+        assert(feSona.verifyLeanIMT(badRoot, leaf, index, siblingsLen, siblings) == false);
+        assert(feYul.verifyLeanIMT(badRoot, leaf, index, siblingsLen, siblings) == false);
+        assert(sol.verifyLeanIMT(badRoot, leaf, index, siblingsLen, siblings) == false);
     }
 
     function testFuzz_LeanIMT_updateRoot_matchesSolidity(
@@ -168,10 +311,55 @@ contract ZkKitMerkleBenchTest {
         uint256 currentRoot = sol.computeLeanIMTRoot(oldLeaf, index, siblingsLen, siblings);
 
         uint256 solNewRoot = sol.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
-        uint256 sonaNewRoot = feSona.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
-        uint256 yulNewRoot = feYul.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings);
-        assert(sonaNewRoot == solNewRoot);
-        assert(yulNewRoot == solNewRoot);
+        assert(feSona.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings) == solNewRoot);
+        assert(feYul.updateLeanIMTRoot(currentRoot, oldLeaf, newLeaf, index, siblingsLen, siblings) == solNewRoot);
+
+        uint256 badRoot = currentRoot ^ 1;
+        {
+            (bool ok, ) = _staticcallU256(
+                address(feSona),
+                abi.encodeWithSelector(
+                    IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+                    badRoot,
+                    oldLeaf,
+                    newLeaf,
+                    index,
+                    siblingsLen,
+                    siblings
+                )
+            );
+            assert(!ok);
+        }
+        {
+            (bool ok, ) = _staticcallU256(
+                address(feYul),
+                abi.encodeWithSelector(
+                    IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+                    badRoot,
+                    oldLeaf,
+                    newLeaf,
+                    index,
+                    siblingsLen,
+                    siblings
+                )
+            );
+            assert(!ok);
+        }
+        {
+            (bool ok, ) = _staticcallU256(
+                address(sol),
+                abi.encodeWithSelector(
+                    SolidityMerkleBench.updateLeanIMTRoot.selector,
+                    badRoot,
+                    oldLeaf,
+                    newLeaf,
+                    index,
+                    siblingsLen,
+                    siblings
+                )
+            );
+            assert(!ok);
+        }
     }
 
     function test_diff_LeanIMT_updateRoot_revertsOnInvalidProof() public view {
@@ -229,11 +417,23 @@ contract ZkKitMerkleBenchTest {
         uint256[32] memory siblings
     ) public view {
         uint256 enables = _mask32(enables0);
-        uint256 solRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
-        uint256 sonaRoot = feSona.computeSMTRoot(leaf, index, enables, siblings);
-        uint256 yulRoot = feYul.computeSMTRoot(leaf, index, enables, siblings);
-        assert(sonaRoot == solRoot);
-        assert(yulRoot == solRoot);
+        uint256 solRoot = _assertSMTRootsMatch(leaf, index, enables, siblings);
+        _assertSMTRootMatchesExpandedLeanIMT(leaf, index, enables, siblings, solRoot);
+
+        // Invariance: high index bits above depth are ignored (depth=32).
+        uint256 index2 = index ^ (uint256(1) << 32);
+        assert(_assertSMTRootsMatch(leaf, index2, enables, siblings) == solRoot);
+
+        // Invariance: enables only uses the low 32 bits.
+        uint256 enables2 = enables | (uint256(1) << 32);
+        assert(_assertSMTRootsMatch(leaf, index, enables2, siblings) == solRoot);
+
+        // Invariance: siblings after the packed `popcount(enables)` are ignored.
+        uint256 used = _popcount32(enables);
+        for (uint256 i = used; i < 32; i++) {
+            siblings[i] ^= ((enables + i + 1) | 1);
+        }
+        assert(_assertSMTRootsMatch(leaf, index, enables, siblings) == solRoot);
     }
 
     function testFuzz_SMT_verify_matchesSolidity(
@@ -247,6 +447,11 @@ contract ZkKitMerkleBenchTest {
         assert(feSona.verifySMT(root, leaf, index, enables, siblings) == true);
         assert(feYul.verifySMT(root, leaf, index, enables, siblings) == true);
         assert(sol.verifySMT(root, leaf, index, enables, siblings) == true);
+
+        uint256 badRoot = root ^ 1;
+        assert(feSona.verifySMT(badRoot, leaf, index, enables, siblings) == false);
+        assert(feYul.verifySMT(badRoot, leaf, index, enables, siblings) == false);
+        assert(sol.verifySMT(badRoot, leaf, index, enables, siblings) == false);
     }
 
     function testFuzz_SMT_updateRoot_matchesSolidity(
@@ -260,10 +465,37 @@ contract ZkKitMerkleBenchTest {
         uint256 currentRoot = sol.computeSMTRoot(oldLeaf, index, enables, siblings);
 
         uint256 solNewRoot = sol.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
-        uint256 sonaNewRoot = feSona.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
-        uint256 yulNewRoot = feYul.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings);
-        assert(sonaNewRoot == solNewRoot);
-        assert(yulNewRoot == solNewRoot);
+        assert(feSona.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings) == solNewRoot);
+        assert(feYul.updateSMTRoot(currentRoot, oldLeaf, newLeaf, index, enables, siblings) == solNewRoot);
+
+        uint256 badRoot = currentRoot ^ 1;
+        {
+            (bool ok, ) = _staticcallU256(
+                address(feSona),
+                abi.encodeWithSelector(
+                    IFeZkKitMerkleBench.updateSMTRoot.selector, badRoot, oldLeaf, newLeaf, index, enables, siblings
+                )
+            );
+            assert(!ok);
+        }
+        {
+            (bool ok, ) = _staticcallU256(
+                address(feYul),
+                abi.encodeWithSelector(
+                    IFeZkKitMerkleBench.updateSMTRoot.selector, badRoot, oldLeaf, newLeaf, index, enables, siblings
+                )
+            );
+            assert(!ok);
+        }
+        {
+            (bool ok, ) = _staticcallU256(
+                address(sol),
+                abi.encodeWithSelector(
+                    SolidityMerkleBench.updateSMTRoot.selector, badRoot, oldLeaf, newLeaf, index, enables, siblings
+                )
+            );
+            assert(!ok);
+        }
     }
 
     function test_diff_SMT_updateRoot_revertsOnInvalidProof() public view {
@@ -294,6 +526,84 @@ contract ZkKitMerkleBenchTest {
         assert(!okSona);
         assert(!okYul);
         assert(!okSol);
+    }
+
+    function testExhaustive_LeanIMT_smallDomain_matchesSolidity() public view {
+        if (exhaustive == 0) return;
+
+        uint256 maxSiblingsLen = exhaustiveLeanIMTMaxSiblings;
+        require(maxSiblingsLen <= 8, "BAD_EXHAUSTIVE_MAX_SIBLINGS_LEN");
+
+        uint256 valueMax = exhaustiveValueMax;
+        require(valueMax >= 2 && valueMax <= 8, "BAD_EXHAUSTIVE_VALUE_MAX");
+
+        uint256[32] memory siblings;
+        for (uint256 siblingsLen = 0; siblingsLen <= maxSiblingsLen; siblingsLen++) {
+            uint256 indexMax = uint256(1) << siblingsLen;
+
+            uint256 combos = 1;
+            for (uint256 i = 0; i < siblingsLen; i++) {
+                combos *= valueMax;
+            }
+
+            for (uint256 idx = 0; idx < indexMax; idx++) {
+                for (uint256 leaf = 0; leaf < valueMax; leaf++) {
+                    for (uint256 c = 0; c < combos; c++) {
+                        uint256 tmp = c;
+                        for (uint256 i = 0; i < siblingsLen; i++) {
+                            siblings[i] = tmp % valueMax;
+                            tmp /= valueMax;
+                        }
+
+                        uint256 solRoot = sol.computeLeanIMTRoot(leaf, idx, siblingsLen, siblings);
+                        uint256 sonaRoot = feSona.computeLeanIMTRoot(leaf, idx, siblingsLen, siblings);
+                        uint256 yulRoot = feYul.computeLeanIMTRoot(leaf, idx, siblingsLen, siblings);
+                        assert(sonaRoot == solRoot);
+                        assert(yulRoot == solRoot);
+                    }
+                }
+            }
+        }
+    }
+
+    function testExhaustive_SMT_smallDomain_matchesSolidity() public view {
+        if (exhaustive == 0) return;
+
+        uint256 maxBits = exhaustiveSMTMaxBits;
+        require(maxBits <= 8, "BAD_EXHAUSTIVE_SMT_MAX_BITS");
+
+        uint256 valueMax = exhaustiveValueMax;
+        require(valueMax >= 2 && valueMax <= 8, "BAD_EXHAUSTIVE_VALUE_MAX");
+
+        uint256[32] memory siblings;
+        uint256 enablesMax = uint256(1) << maxBits;
+        uint256 indexMax = uint256(1) << maxBits;
+
+        for (uint256 enables = 0; enables < enablesMax; enables++) {
+            uint256 used = _popcount32(enables);
+
+            uint256 combos = 1;
+            for (uint256 i = 0; i < used; i++) {
+                combos *= valueMax;
+            }
+
+            for (uint256 idx = 0; idx < indexMax; idx++) {
+                for (uint256 leaf = 0; leaf < valueMax; leaf++) {
+                    for (uint256 c = 0; c < combos; c++) {
+                        uint256 tmp = c;
+                        for (uint256 i = 0; i < used; i++) {
+                            siblings[i] = tmp % valueMax;
+                            tmp /= valueMax;
+                        }
+                        for (uint256 i = used; i < maxBits; i++) {
+                            siblings[i] = 0;
+                        }
+
+                        _assertSMTRootsMatch(leaf, idx, enables, siblings);
+                    }
+                }
+            }
+        }
     }
 
     function test_diff_LeanIMT_computeRoot_revertsOnSiblingsLenGt32() public view {
@@ -410,7 +720,7 @@ contract ZkKitMerkleBenchTest {
     function testGas_bench_fe_sona_updateLeanIMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
-        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
@@ -433,7 +743,7 @@ contract ZkKitMerkleBenchTest {
     function testGas_bench_fe_yul_updateLeanIMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
-        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
@@ -456,7 +766,7 @@ contract ZkKitMerkleBenchTest {
     function testGas_bench_solidity_updateLeanIMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
-        uint256 currentRoot = sol.computeLeanIMTRoot(leaf, index, siblingsLen, siblings);
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             SolidityMerkleBench.updateLeanIMTRoot.selector,
@@ -474,6 +784,171 @@ contract ZkKitMerkleBenchTest {
 
         vm.pauseGasMetering();
         require(ok && newRoot != 0, "Solidity: updateLeanIMTRoot");
+    }
+
+    function testGas_bench_fe_sona_verifyLeanIMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/sona: verifyLeanIMT");
+    }
+
+    function testGas_bench_fe_yul_verifyLeanIMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/yul: verifyLeanIMT");
+    }
+
+    function testGas_bench_solidity_verifyLeanIMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "Solidity: verifyLeanIMT");
+    }
+
+    function testGas_bench_fe_sona_verifyLeanIMT_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/sona: verifyLeanIMT (32)");
+    }
+
+    function testGas_bench_fe_yul_verifyLeanIMT_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/yul: verifyLeanIMT (32)");
+    }
+
+    function testGas_bench_solidity_verifyLeanIMT_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 root = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.verifyLeanIMT.selector, root, leaf, index, siblingsLen, siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "Solidity: verifyLeanIMT (32)");
+    }
+
+    function testGas_bench_fe_sona_updateLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/sona: updateLeanIMTRoot (32)");
+    }
+
+    function testGas_bench_fe_yul_updateLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/yul: updateLeanIMTRoot (32)");
+    }
+
+    function testGas_bench_solidity_updateLeanIMTRoot_32Siblings() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 siblingsLen, uint256[32] memory siblings) = _demoLeanIMT_32();
+        uint256 currentRoot = _computeLeanIMTRootLocal(leaf, index, siblingsLen, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.updateLeanIMTRoot.selector,
+            currentRoot,
+            leaf,
+            newLeaf,
+            index,
+            siblingsLen,
+            siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "Solidity: updateLeanIMTRoot (32)");
     }
 
     function testGas_bench_fe_sona_computeSMTRoot_typical() public {
@@ -560,10 +1035,100 @@ contract ZkKitMerkleBenchTest {
         require(ok && root != 0, "Solidity: computeSMTRoot (all enabled)");
     }
 
+    function testGas_bench_fe_sona_verifySMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/sona: verifySMT");
+    }
+
+    function testGas_bench_fe_yul_verifySMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/yul: verifySMT");
+    }
+
+    function testGas_bench_solidity_verifySMT_typical() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "Solidity: verifySMT");
+    }
+
+    function testGas_bench_fe_sona_verifySMT_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/sona: verifySMT (all enabled)");
+    }
+
+    function testGas_bench_fe_yul_verifySMT_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(IFeZkKitMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "FE/yul: verifySMT (all enabled)");
+    }
+
+    function testGas_bench_solidity_verifySMT_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 root = _computeSMTRootLocal(leaf, index, enables, siblings);
+        bytes memory callData =
+            abi.encodeWithSelector(SolidityMerkleBench.verifySMT.selector, root, leaf, index, enables, siblings);
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 result) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && result == 1, "Solidity: verifySMT (all enabled)");
+    }
+
     function testGas_bench_fe_sona_updateSMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
-        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
@@ -580,7 +1145,7 @@ contract ZkKitMerkleBenchTest {
     function testGas_bench_fe_yul_updateSMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
-        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
@@ -597,7 +1162,7 @@ contract ZkKitMerkleBenchTest {
     function testGas_bench_solidity_updateSMTRoot_typical() public {
         vm.pauseGasMetering();
         (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT();
-        uint256 currentRoot = sol.computeSMTRoot(leaf, index, enables, siblings);
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
         uint256 newLeaf = leaf ^ 0x1234;
         bytes memory callData = abi.encodeWithSelector(
             SolidityMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
@@ -609,6 +1174,57 @@ contract ZkKitMerkleBenchTest {
 
         vm.pauseGasMetering();
         require(ok && newRoot != 0, "Solidity: updateSMTRoot");
+    }
+
+    function testGas_bench_fe_sona_updateSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(feSona));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feSona), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/sona: updateSMTRoot (all enabled)");
+    }
+
+    function testGas_bench_fe_yul_updateSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            IFeZkKitMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(feYul));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(feYul), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "FE/yul: updateSMTRoot (all enabled)");
+    }
+
+    function testGas_bench_solidity_updateSMTRoot_allEnabled() public {
+        vm.pauseGasMetering();
+        (uint256 leaf, uint256 index, uint256 enables, uint256[32] memory siblings) = _demoSMT_allEnabled();
+        uint256 currentRoot = _computeSMTRootLocal(leaf, index, enables, siblings);
+        uint256 newLeaf = leaf ^ 0x1234;
+        bytes memory callData = abi.encodeWithSelector(
+            SolidityMerkleBench.updateSMTRoot.selector, currentRoot, leaf, newLeaf, index, enables, siblings
+        );
+        _warm(address(sol));
+        vm.resumeGasMetering();
+
+        (bool ok, uint256 newRoot) = _staticcallU256(address(sol), callData);
+
+        vm.pauseGasMetering();
+        require(ok && newRoot != 0, "Solidity: updateSMTRoot (all enabled)");
     }
 
     // -------------------------------------------------------------------------
