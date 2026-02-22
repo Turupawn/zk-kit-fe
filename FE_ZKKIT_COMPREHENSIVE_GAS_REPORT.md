@@ -2,7 +2,7 @@
 
 This repo includes `fe-zkkit/bench`, a Foundry project that deploys equivalent Merkle helper contracts and benchmarks gas across:
 
-- **Fe → Sonatina** (`fe build --backend sonatina`) at `--opt-level 0|1|2`
+- **Fe → Sonatina** (`fe build --backend sonatina`) at `--opt-level 2` (**optimized**, reported below)
 - **Fe → Yul → solc** (`fe build --backend yul --optimize --solc /usr/bin/solc`)
 - **Solidity → solc** (reference implementation compiled by Foundry)
 
@@ -10,13 +10,12 @@ The benchmarked contract is `ZkKitMerkleBench` (LeanIMT + SMT helpers, Keccak-ba
 
 ## Executive summary
 
-- **Recommended**: `fe → sonatina --opt-level 1` (and `2`) for these workloads.
-- In this environment, **Sonatina `--opt-level 1` and `2` produce identical gas** for all benchmarks below.
-- `--opt-level 0` is materially slower across the board.
+- **Recommended**: `fe → sonatina --opt-level 2` (optimized).
+- In this environment, **Sonatina `--opt-level 1` and `2` produce identical gas** for all benchmarks below (only `2` is shown).
 
 ## Toolchain / environment (verified)
 
-- Date: **2026-02-20**
+- Date: **2026-02-21**
 - `fe`: **0.26.0** (`/usr/local/bin/fe` from `PATH`)
 - `fe` repo: `../fe` @ `c8dfd6656`
 - `forge`: **1.5.0-stable**
@@ -37,27 +36,32 @@ Numbers come from:
 ```bash
 cd fe-zkkit/bench
 rm -rf out/fe
-FE_SONA_OPT_LEVEL=0 forge test --ffi --offline -vvv --match-test testGas_bench_
-rm -rf out/fe
-FE_SONA_OPT_LEVEL=1 forge test --ffi --offline -vvv --match-test testGas_bench_
-rm -rf out/fe
 FE_SONA_OPT_LEVEL=2 forge test --ffi --offline -vvv --match-test testGas_bench_
 ```
 
-| Benchmark | fe→sona O0 | fe→sona O1 | fe→sona O2 | fe→yul | Solidity |
-|---|---:|---:|---:|---:|---:|
-| LeanIMT `computeRoot` (siblings=7) | 10,241 | 9,788 | 9,788 | 9,975 | 10,640 |
-| LeanIMT `verify` (siblings=7) | 10,316 | 9,869 | 9,869 | 10,045 | 10,639 |
-| LeanIMT `updateRoot` (siblings=7) | 11,455 | 10,494 | 10,494 | 10,642 | 12,449 |
-| LeanIMT `computeRoot` (siblings=32) | 16,093 | 14,105 | 14,105 | 15,068 | 16,564 |
-| LeanIMT `verify` (siblings=32) | 16,172 | 14,190 | 14,190 | 15,205 | 16,563 |
-| LeanIMT `updateRoot` (siblings=32) | 20,884 | 16,538 | 16,538 | 17,907 | 24,321 |
-| SMT `computeRoot` (typical enables) | 23,093 | 18,057 | 18,057 | 20,477 | 19,544 |
-| SMT `verify` (typical enables) | 23,192 | 18,162 | 18,162 | 20,549 | 19,632 |
-| SMT `updateRoot` (typical enables) | 28,194 | 20,943 | 20,943 | 23,207 | 30,434 |
-| SMT `computeRoot` (all enabled) | 16,213 | 14,243 | 14,243 | 15,764 | 16,558 |
-| SMT `verify` (all enabled) | 16,267 | 14,303 | 14,303 | 15,857 | 16,621 |
-| SMT `updateRoot` (all enabled) | 20,764 | 17,044 | 17,044 | 18,516 | 24,371 |
+| Benchmark | fe→sona (O2) | fe→yul | Solidity |
+|---|---:|---:|---:|
+| LeanIMT `computeRoot` (siblings=7) | 9,788 | 9,975 | 10,640 |
+| LeanIMT `verify` (siblings=7) | 9,869 | 10,045 | 10,639 |
+| LeanIMT `updateRoot` (siblings=7) | 10,494 | 10,642 | 12,449 |
+| LeanIMT `computeRoot` (siblings=32) | 14,105 | 15,068 | 16,564 |
+| LeanIMT `verify` (siblings=32) | 14,190 | 15,205 | 16,563 |
+| LeanIMT `updateRoot` (siblings=32) | 16,538 | 17,907 | 24,321 |
+| SMT `computeRoot` (typical enables) | 17,270 | 18,768 | 19,544 |
+| SMT `verify` (typical enables) | 17,375 | 18,840 | 19,632 |
+| SMT `updateRoot` (typical enables) | 20,345 | 21,498 | 30,434 |
+| SMT `computeRoot` (all enabled) | 14,247 | 15,764 | 16,558 |
+| SMT `verify` (all enabled) | 14,307 | 15,857 | 16,621 |
+| SMT `updateRoot` (all enabled) | 17,048 | 18,516 | 24,371 |
+
+## Optimization note: SMT default `zero` nodes
+
+For compressed SMT proofs (`enables != 0xffffffff`), the reference algorithm must use per-level default `zero` nodes derived by:
+
+- `zero[0] = 0`
+- `zero[i+1] = keccak256(zero[i] || zero[i])`
+
+Using Foundry's debugger dump (`forge test --debug --dump ...`) we confirmed that the previous implementation executed **64 `KECCAK256` opcodes** per call on the SMT "typical enables" vector (32 for the main path, plus 32 for computing `zero[i]` on-the-fly). The Fe bench contract now uses a precomputed `zero[i]` table for missing siblings, bringing that down to **32 `KECCAK256`** (one per level) and improving the SMT typical benches shown above.
 
 ## Benchmark vectors (for context)
 
