@@ -44,6 +44,57 @@ Both Fe revisions report `fe 26.0.0-alpha.5`, but they pin different Sonatina gi
 | SMT `verify` (all enabled) | 14,307 | 15,087 | +780 | +5.45% |
 | SMT `updateRoot` (all enabled) | 17,048 | 17,402 | +354 | +2.08% |
 
+## Opcode deltas (Fe→Sonatina, O2)
+
+For several representative benches, we collected opcode-level traces using `forge test --debug --dump ...` and analyzed the **`STATICCALL` frame** (the actual call into the Fe Sonatina contract). For each opcode, we summed:
+
+- **count**: number of executed steps with that opcode
+- **gas**: sum of per-step `gas_cost` reported by the debugger
+
+### Summary
+
+- The regression is dominated by **additional stack-manipulation opcodes** (`SWAP*`, `DUP*`, `POP`).
+- **No increase in `KECCAK256` count** was observed in the SMT “typical enables” path (still **32**).
+
+### LeanIMT `computeRoot` (siblings=32): +786 gas
+
+| Opcode | Δ count | Δ gas |
+|---|---:|---:|
+| `SWAP1` | +128 | +384 |
+| `SWAP2` | +102 | +306 |
+| `SWAP3` | +32 | +96 |
+
+### SMT `computeRoot` (typical enables): +2,219 gas
+
+| Opcode | Δ count | Δ gas |
+|---|---:|---:|
+| `SWAP5` | +179 | +537 |
+| `SWAP2` | +159 | +477 |
+| `SWAP1` | +152 | +456 |
+| `SWAP3` | +110 | +330 |
+| `SWAP4` | +104 | +312 |
+| `POP` | +64 | +128 |
+| `DUP7` | +32 | +96 |
+| `DUP6` | +32 | +96 |
+| `DUP5` | +32 | +96 |
+
+`SMT verify (typical)` shows the same opcode deltas and totals (+2,219 gas).
+
+### SMT `updateRoot` (typical enables): +2,159 gas
+
+| Opcode | Δ count | Δ gas |
+|---|---:|---:|
+| `SWAP6` | +192 | +576 |
+| `SWAP3` | +158 | +474 |
+| `SWAP4` | +123 | +369 |
+| `SWAP5` | +78 | +234 |
+| `SWAP1` | +76 | +228 |
+| `SWAP2` | +59 | +177 |
+| `POP` | +64 | +128 |
+| `DUP8` | +32 | +96 |
+| `DUP7` | +32 | +96 |
+| `DUP6` | +32 | +96 |
+
 ## Reproduce locally
 
 Build each Fe revision (so you have two `fe` binaries), then run the bench from `fe-zkkit/bench` with the desired `fe` first on `PATH`:
