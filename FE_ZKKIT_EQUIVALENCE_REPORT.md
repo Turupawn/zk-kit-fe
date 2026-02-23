@@ -10,9 +10,9 @@ This report documents the current equivalence status of the **Fe Sonatina** back
 
 ## Toolchain / environment (verified)
 
-- Date: **2026-02-21**
-- `fe`: **0.26.0** (`/usr/local/bin/fe` from `PATH`)
-- `fe` repo: `../fe` @ `c8dfd6656`
+- Date: **2026-02-23**
+- `fe`: **26.0.0-alpha.5** (built from source)
+- `fe` repo: `../fe` @ `fe3257412`
 - `forge`: **1.5.0-stable**
 - `solc`: **0.8.33** (`/usr/bin/solc`)
 
