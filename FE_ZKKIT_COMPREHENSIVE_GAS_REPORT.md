@@ -14,7 +14,7 @@ Merkle tree implementations across the Ethereum ecosystem use different hash fun
 
 Fe's `Hasher` trait separates the hash function from the tree logic. The core library is audited once. Switching hashers is a drop-in replacement with zero changes to the library code. The compiler resolves which implementation to use at compile time (monomorphization), so there is no runtime dispatch cost:
 
-```fe
+```rust
 pub trait Hasher {
     fn alloc_scratch() -> u256
     fn hash2_at(ptr: u256, left: u256, right: u256) -> u256
@@ -45,7 +45,7 @@ Different applications need different tree depths. Today each depth requires eit
 
 Const generics let you parameterize a function over a compile-time constant. The compiler generates specialized code for each value used, so `compute_root<KeccakHasher, 32>` becomes bytecode optimized specifically for depth 32, just as if you had hardcoded `32` everywhere:
 
-```fe
+```rust
 pub fn compute_root<H: Hasher, const DEPTH: usize>(
     leaf: u256,
     index: u256,
@@ -67,7 +67,7 @@ Shared library code today either requires `DELEGATECALL` (100 gas warm, 2,600 ga
 
 Fe's library (`hash.fe`, `lean_imt.fe`, `smt.fe`) lives in separate, reusable files. Any contract can call them with zero overhead. The compiler inlines everything:
 
-```fe
+```rust
 let root = lean_imt::compute_root_from_proof<KeccakHasher, 32>(
     leaf, index, siblings_len, siblings)
 ```
@@ -100,7 +100,7 @@ if (isRightChild) {
 
 Fe replaces all of them with one generic helper:
 
-```fe
+```rust
 pub fn hash_step<H: Hasher>(
     scratch: u256, node: u256, sibling: u256, is_right_child: bool,
 ) -> u256 {
@@ -125,7 +125,7 @@ Backend library contracts, like a deployed Poseidon hasher used by MACI, Semapho
 
 Fe's `Abi` trait makes the selector format a type parameter:
 
-```fe
+```rust
 pub trait Abi {
     type Selector          // u32 for Solidity, u8 or () for custom ABIs
     const SELECTOR_SIZE: u256   // 4 for Solidity, 1 or 0 for custom
